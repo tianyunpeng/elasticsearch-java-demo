@@ -1,5 +1,9 @@
 package com.shineyue.controller;
 
+import java.util.ArrayList;
+import java.util.List;
+
+import javax.servlet.http.HttpServletRequest;
 import javax.websocket.EncodeException;
 
 import org.slf4j.Logger;
@@ -81,4 +85,56 @@ public class EsController {
 		return responseData;
 	}
 
+	@RequestMapping(value = "/pt/elasticsearch/createIndexGet", method = RequestMethod.GET)
+	@ResponseBody
+	public ResponseData createIndexGet(HttpServletRequest request) {
+		ResponseData responseData = new ResponseData();
+		JSONObject bean = new JSONObject();
+		if (null == request.getParameter("indexName") || null == request.getParameter("indexType")) {
+			responseData.setSuccess(false);
+			responseData.setMsg("indexName、indexType不可为空！");
+			return responseData;
+		}
+		bean.put("indexName", request.getParameter("indexName"));
+		bean.put("indexType", request.getParameter("indexType"));
+		responseData = service.createIndex(bean);
+		return responseData;
+	}
+
+	@RequestMapping(value = "/pt/elasticsearch/queryIndexTypeListGet", method = RequestMethod.GET)
+	@ResponseBody
+	public ResponseData queryIndexTypeListGet() {
+		ResponseData responseData = new ResponseData();
+		responseData = service.queryIndexTypeList();
+		return responseData;
+	}
+
+	@RequestMapping(value = "/pt/elasticsearch/createAllDefaultIndexGet", method = RequestMethod.GET)
+	@ResponseBody
+	public ResponseData createAllDefaultIndexGet(HttpServletRequest request) {
+		ResponseData responseData = new ResponseData();
+		if (null == request.getParameter("cpmc")) {
+			responseData.setSuccess(false);
+			responseData.setMsg("产品名称不能为空！");
+			return responseData;
+		}
+		JSONObject bean = new JSONObject();
+		ResponseData indexTypeListResponse = new ResponseData();
+		indexTypeListResponse = service.queryIndexTypeList();
+		List<String> indexTypeList = (List<String>) indexTypeListResponse.getResults();
+		// 遍历创建index
+		List<String> createIndexResult = new ArrayList<String>();
+		for (String indexType : indexTypeList) {
+			bean.put("indexName", request.getParameter("cpmc") + "-" + "elasticsearch" + "-" + indexType);
+			bean.put("indexType", indexType);
+			ResponseData createIndexResponse = new ResponseData();
+			createIndexResponse = service.createIndex(bean);
+			String successMsg = "indexType为" + indexType + "的索引创建成功";
+			String falseMsg = "indexType为" + indexType + "的索引创建失败！" + createIndexResponse.getMsg();
+			createIndexResult.add(createIndexResponse.isSuccess() ? successMsg : falseMsg);
+		}
+		responseData.setSuccess(true);
+		responseData.setResults(createIndexResult);
+		return responseData;
+	}
 }

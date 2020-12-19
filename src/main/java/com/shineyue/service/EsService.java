@@ -3,6 +3,7 @@ package com.shineyue.service;
 import java.io.File;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.URL;
@@ -40,7 +41,6 @@ import org.springframework.data.elasticsearch.core.query.SearchQuery;
 import org.springframework.stereotype.Service;
 
 import com.alibaba.fastjson.JSONObject;
-import com.shineyue.bean.InfoBean;
 import com.shineyue.utils.IdAutoUtils;
 import com.shineyue.utils.ResponseData;
 import com.shineyue.utils.StringTool;
@@ -82,20 +82,19 @@ public class EsService {
 	 */
 	public ResponseData queryDocument(JSONObject bean) {
 		ResponseData data = new ResponseData();
-		if (!StringUtils.isNotBlank(bean.getString("indexName"))
+		if (!StringUtils.isNotBlank(bean.getString("indexName").toLowerCase())
 				|| !StringUtils.isNotBlank(bean.getString("indexType"))) {
 			data.setSuccess(false);
 			data.setMsg("indexName、indexType不可为空！");
 			return data;
 		}
-		String indexName = bean.getString("indexName");
+		String indexName = bean.getString("indexName").toLowerCase();
 		log.info("根据条件查询文档，indexName==={},入参===={}", indexName, bean.toString());
 
 		try {
 			if (elasticsearchTemplate.indexExists(indexName)) {
-				// indexType为小写
-				String indexType = bean.getString("indexType").toLowerCase();
-				int searchSize = bean.getInteger("size") != null ? bean.getInteger("size") : Integer.MAX_VALUE;
+				String indexType = bean.getString("indexType");
+				int searchSize = bean.getInteger("size") != null ? bean.getInteger("size") : MAX_SEARCH_SIZE;
 				searchSize = searchSize > MAX_SEARCH_SIZE ? MAX_SEARCH_SIZE : searchSize;
 				Pageable pageable = PageRequest.of(0, searchSize, Direction.DESC, "id");
 
@@ -130,7 +129,7 @@ public class EsService {
 				// 查询条件合并
 				SearchQuery searchQuery = new NativeSearchQueryBuilder().withIndices(indexName).withTypes(indexType)
 						.withQuery(searchBuilder).withPageable(pageable).build();
-				data = searchLog(searchQuery);
+				data = searchLog(searchQuery, indexType);
 				data.setMsg("根据条件查询文档成功");
 				data.setSuccess(true);
 				log.info("查询成功==>total: {} ,size:{}", data.getTotalcount(), searchSize);
@@ -153,16 +152,52 @@ public class EsService {
 	 * @return
 	 */
 	public ResponseData createIndex(JSONObject bean) {
+
 		ResponseData responseData = new ResponseData();
-		if (!StringUtils.isNotBlank(bean.getString("indexName"))) {
+		if (!StringUtils.isNotBlank(bean.getString("indexName").toLowerCase())
+				|| !StringUtils.isNotBlank(bean.getString("indexType"))) {
 			responseData.setSuccess(false);
-			responseData.setMsg("indexName不可为空！");
+			responseData.setMsg("indexName、indexType不可为空！");
 			return responseData;
 		}
-		log.info("创建index==={}", bean.getString("indexName"));
-		Boolean createIndexFlag = elasticsearchTemplate.createIndex(bean.getString("indexName"));
-		responseData.setSuccess(createIndexFlag);
-		responseData.setMsg("创建index成功");
+		log.info("创建indexName==={},indexType==={}", bean.getString("indexName").toLowerCase(),
+				bean.getString("indexType"));
+		// 先查询该文档的索引是否存在！
+		ResponseData indexList = getAllIndexs();
+		log.info("indexList===" + indexList.getResults());
+		if (indexList.getResults().size() > 0
+				&& indexList.getResults().contains(bean.getString("indexName").toLowerCase())) {
+			responseData.setSuccess(false);
+			responseData.setMsg("该索引已存在，创建索引失败！");
+			return responseData;
+		}
+		String indexType = bean.getString("indexType");
+		String className = StringTool.concat("com.shineyue.index.", bean.getString("indexType"));
+		JSONObject mapping = classToMapping(className, indexType);
+		Boolean createIndexFlag = elasticsearchTemplate.createIndex(bean.getString("indexName").toLowerCase());
+		Boolean putMappingFlag = true;
+		if (createIndexFlag) {
+			// 创建index成功后，根据类转换成mapping创建mapping
+			Class cls = null;
+			try {
+				cls = Class.forName(className);
+			} catch (ClassNotFoundException e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+
+			putMappingFlag = elasticsearchTemplate.putMapping(cls, mapping);
+			// putMappingFlag =
+			// elasticsearchTemplate.putMapping(CustomerIndex.class, mapping);
+
+		}
+		if (putMappingFlag) {
+			responseData.setSuccess(true);
+			responseData.setMsg("创建index成功");
+		} else {
+			responseData.setSuccess(false);
+			responseData.setMsg("创建index失败！");
+		}
 		return responseData;
 	}
 
@@ -174,14 +209,24 @@ public class EsService {
 	public ResponseData createDocumentAdapt(JSONObject bean) {
 		log.info("创建自适应文档body==={}", bean.toString());
 		ResponseData responseData = new ResponseData();
-		if (!StringUtils.isNotBlank(bean.getString("indexType"))) {
+		String indexName = bean.getString("indexName").toLowerCase();
+		String indexType = bean.getString("indexType");
+		if (!StringUtils.isNotBlank(indexName) || !StringUtils.isNotBlank(indexType)) {
 			responseData.setSuccess(false);
-			responseData.setMsg("indexType不可为空！");
+			responseData.setMsg("indexName、indexType不可为空！");
 			return responseData;
 		}
+		// 先查询该文档的索引是否存在！
+		ResponseData indexList = getAllIndexs();
+		log.info("indexList===" + indexList.getResults());
+		if (indexList.getResults().size() <= 0 || !indexList.getResults().contains(indexName)) {
+			responseData.setSuccess(false);
+			responseData.setMsg("该索引不存在，请先新建索引！");
+			return responseData;
+		}
+
 		responseData.setSuccess(true);
-		String className = StringTool.concat("com.shineyue.index.", StringTool.InitialCap(bean.getString("indexType")),
-				"Index");
+		String className = StringTool.concat("com.shineyue.index.", bean.getString("indexType"));
 		Class cls = null;
 		Method method = null;
 		Object o = null;
@@ -243,13 +288,13 @@ public class EsService {
 	 */
 	public ResponseData deleteDocument(JSONObject bean) {
 		ResponseData responseData = new ResponseData();
-		if (!StringUtils.isNotBlank(bean.getString("indexName"))
+		if (!StringUtils.isNotBlank(bean.getString("indexName").toLowerCase())
 				|| !StringUtils.isNotBlank(bean.getString("indexType"))) {
 			responseData.setSuccess(false);
 			responseData.setMsg("indexName或indexType不可为空！");
 			return responseData;
 		}
-		String indexName = bean.getString("indexName");
+		String indexName = bean.getString("indexName").toLowerCase();
 		log.info("删除文档indexName==={},body==={}", indexName, bean.toString());
 
 		String result = "";
@@ -311,8 +356,8 @@ public class EsService {
 	 *            是否处理查询结果
 	 * @return
 	 */
-	public ResponseData searchLog(SearchQuery searchQuery) {
-		log.info("查询入参==={}", searchQuery.getFields());
+	public ResponseData searchLog(SearchQuery searchQuery, String indexType) {
+		log.info("查询入参==={}", searchQuery.getQuery());
 		ResponseData data = elasticsearchTemplate.query(searchQuery, new ResultsExtractor<ResponseData>() {
 			@Override
 			public ResponseData extract(SearchResponse response) {
@@ -323,17 +368,25 @@ public class EsService {
 					return searchData;
 				}
 				searchData.setTotalcount(total);
-				List<InfoBean> ibList = new ArrayList<InfoBean>();
+				List<Object> documentList = new ArrayList<Object>();
 				for (SearchHit hit : searchResults) {
 					String hitResult = hit.getSourceAsString();
 					System.out.println("hitResult===" + hitResult);
-					InfoBean ib = new InfoBean();
-					ib = JSONObject.parseObject(hitResult, InfoBean.class);
-					ibList.add(ib);
+					String classUrl = StringTool.concat("com.shineyue.index.", indexType);
+					Class cls = null;
+					try {
+						cls = Class.forName(classUrl);
+					} catch (ClassNotFoundException e) {
+						// TODO Auto-generated catch block
+						e.printStackTrace();
+					}
+					Object document = new Object();
+					document = JSONObject.parseObject(hitResult, cls);
+					documentList.add(document);
 				}
 				// 降序排序
-				Collections.reverse(ibList);
-				searchData.setResults(ibList);
+				Collections.reverse(documentList);
+				searchData.setResults(documentList);
 				return searchData;
 			}
 		});
@@ -363,10 +416,12 @@ public class EsService {
 		}
 		while (urls.hasMoreElements()) {
 			URL url = urls.nextElement();
+			log.info("url===" + url);
 			if (url == null)
 				continue;
 			String type = url.getProtocol();
 			if (type.equals("file")) {
+				log.info("type===" + type);
 				try {
 					fileNames.addAll(getClassNameByFile(url.getPath(), childPackage));
 				} catch (UnsupportedEncodingException e) {
@@ -384,17 +439,20 @@ public class EsService {
 		}
 		try {
 			fileNames.addAll(getClassNameByJars(((URLClassLoader) loader).getURLs(), packagePath, childPackage));
+			log.info("fileNames===" + fileNames);
 		} catch (UnsupportedEncodingException e) {
 			responseData.setSuccess(false);
 			e.printStackTrace();
 		}
 		for (String className : fileNames) {
+			log.info("className===" + className);
 			// 去除前缀
 			String replace = "ode\\pt-elasticsearch\\target\\classes\\com\\shineyue\\index\\";
 			className = className.replace(replace, "");
-			// 去除Index后缀
-			className = className.replace("Index", "");
-			classNameList.add(className.toLowerCase());
+			// 去除前缀2
+			String replace2 = "BOOT-INF.classes.com.shineyue.index.";
+			className = className.replace(replace2, "");
+			classNameList.add(className);
 		}
 		responseData.setSuccess(true);
 		responseData.setResults(classNameList);
@@ -415,15 +473,19 @@ public class EsService {
 	private static List<String> getClassNameByJar(String jarPath, boolean childPackage)
 			throws UnsupportedEncodingException {
 		List<String> myClassName = new ArrayList<String>();
+		log.info("jarPath===" + jarPath);
 		String[] jarInfo = jarPath.split("!");
 		String jarFilePath = jarInfo[0].substring(jarInfo[0].indexOf("/"));
 		String packagePath = jarInfo[1].substring(1);
+		packagePath = StringTool.concat(packagePath, "/com/shineyue/index");
+		log.info("jarFilePath==={},packagePath==={}", jarFilePath, packagePath);
 		try {
 			JarFile jarFile = new JarFile(jarFilePath);
 			Enumeration<JarEntry> entrys = jarFile.entries();
 			while (entrys.hasMoreElements()) {
 				JarEntry jarEntry = entrys.nextElement();
 				String entryName = jarEntry.getName();
+				log.info("jarEntry==={},entryName==={}", jarEntry, entryName);
 				if (entryName.endsWith(".class")) {
 					if (childPackage) {
 						if (entryName.startsWith(packagePath)) {
@@ -438,8 +500,10 @@ public class EsService {
 						} else {
 							myPackagePath = entryName;
 						}
+						log.info("myPackagePath==={}", myPackagePath);
 						if (myPackagePath.equals(packagePath)) {
 							entryName = entryName.replace("/", ".").substring(0, entryName.lastIndexOf("."));
+							log.info("entryName==={}", entryName);
 							myClassName.add(entryName);
 						}
 					}
@@ -470,6 +534,7 @@ public class EsService {
 			for (int i = 0; i < urls.length; i++) {
 				URL url = urls[i];
 				String urlPath = url.getPath();
+				log.info("urlPath===" + urlPath);
 				// 不必搜索classes文件夹
 				if (urlPath.endsWith("classes/")) {
 					continue;
@@ -509,6 +574,7 @@ public class EsService {
 					childFilePath = childFilePath.substring(childFilePath.indexOf("/classes/") + 9,
 							childFilePath.lastIndexOf("."));
 					childFilePath = childFilePath.replace("/", ".");
+					log.info("childFilePath===" + childFilePath);
 					myClassName.add(childFilePath);
 				}
 			}
@@ -542,5 +608,50 @@ public class EsService {
 			return deleteResult;
 
 		}
+	}
+
+	public JSONObject classToMapping(String className, String indexType) {
+		log.info("class转mapping开始=={}", className);
+		Class<?> aClass = null;
+		try {
+			// aClass = ClassLoader.getSystemClassLoader().loadClass(className);
+			aClass = Class.forName(className);
+		} catch (ClassNotFoundException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		} // 这里是需要转换对象
+		Field[] fields = aClass.getDeclaredFields();
+		JSONObject jsonObject = new JSONObject();
+		for (int i = 0; i < fields.length; i++) {
+			String name = fields[i].getName();
+			JSONObject sub = new JSONObject();
+			String type = fields[i].getType().getTypeName();
+			if (type.contains("Integer") || type.contains("int")) {
+				sub.put("type", "integer");
+			} else if (type.contains("Long") || type.contains("long")) {
+				sub.put("type", "long");
+			} else if (type.contains("String")) {
+				// sub.put("type", "keyword");
+				sub.put("type", "text");
+			} else if (type.contains("Boolean") || type.contains("boolean")) {
+				sub.put("type", "boolean");
+			} else if (type.contains("BigDecimal")) {
+				sub.put("type", "float");
+			} else if (type.contains("Date")) {
+				sub.put("type", "date");
+			} else {
+				sub.put("type", "text");
+			}
+			if ("id".equals(name)) {
+				sub.put("fielddata", true);
+			}
+			jsonObject.put(name, sub);
+		}
+		log.info("转换成的mapping==={}", JSONObject.toJSONString(jsonObject));
+		JSONObject mapping2 = new JSONObject();
+		JSONObject mapping3 = new JSONObject();
+		mapping2.put("properties", jsonObject);
+		mapping3.put(indexType, mapping2);
+		return mapping3;
 	}
 }
